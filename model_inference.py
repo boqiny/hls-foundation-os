@@ -13,10 +13,38 @@ from mmseg.datasets.pipelines import Compose, LoadImageFromFile
 from mmseg.models import build_segmentor
 from tifffile import imread
 
+from skimage import exposure 
+
+cdl_color_map = [{'value': 1, 'label': 'Natural vegetation', 'rgb': (233,255,190)},
+                 {'value': 2, 'label': 'Forest', 'rgb': (149,206,147)},
+                 {'value': 3, 'label': 'Corn', 'rgb': (255,212,0)},
+                 {'value': 4, 'label': 'Soybeans', 'rgb': (38,115,0)},
+                 {'value': 5, 'label': 'Wetlands', 'rgb': (128,179,179)},
+                 {'value': 6, 'label': 'Developed/Barren', 'rgb': (156,156,156)},
+                 {'value': 7, 'label': 'Open Water', 'rgb': (77,112,163)},
+                 {'value': 8, 'label': 'Winter Wheat', 'rgb': (168,112,0)},
+                 {'value': 9, 'label': 'Alfalfa', 'rgb': (255,168,227)},
+                 {'value': 10, 'label': 'Fallow/Idle cropland', 'rgb': (191,191,122)},
+                 {'value': 11, 'label': 'Cotton', 'rgb':(255,38,38)},
+                 {'value': 12, 'label': 'Sorghum', 'rgb':(255,158,15)},
+                 {'value': 13, 'label': 'Other', 'rgb':(0,175,77)}]
+
+def apply_color_map(rgb, color_map=cdl_color_map):
+    
+    
+    rgb_mapped = rgb.copy()
+    
+    for map_tmp in cdl_color_map:
+        
+        for i in range(3):
+            rgb_mapped[i] = np.where((rgb[0] == map_tmp['value']) & (rgb[1] == map_tmp['value']) & (rgb[2] == map_tmp['value']), map_tmp['rgb'][i], rgb_mapped[i])
+    
+    return rgb_mapped    
+
 
 def parse_args():
     
-    parser = argparse.ArgumentParser(description="Inference on flood detection fine-tuned model")
+    parser = argparse.ArgumentParser(description="Inference on crop_classification fine-tuned model")
     parser.add_argument('-config', help='path to model configuration file')
     parser.add_argument('-ckpt', help='path to model checkpoint')
     parser.add_argument('-input', help='path to input images folder for inference')
@@ -29,8 +57,20 @@ def parse_args():
     return args
 
 def open_tiff(fname):
-    data = imread(fname)
+    
+    with rasterio.open(fname, "r") as src:
+        
+        data = src.read()
+        
     return data
+
+def stretch_rgb(rgb):
+    
+    ls_pct=0
+    pLow, pHigh = np.percentile(rgb[~np.isnan(rgb)], (ls_pct,100-ls_pct))
+    img_rescale = exposure.rescale_intensity(rgb, in_range=(pLow,pHigh))
+    
+    return img_rescale
 
 def write_tiff(img_wrt, filename, metadata):
 
@@ -63,7 +103,11 @@ def get_meta(fname):
         
     return meta
 
-
+def preprocess_example(example_list):
+    
+    example_list = [os.path.join(os.path.abspath(''), x) for x in example_list]
+    
+    return example_list
 
 def inference_segmentor(model, imgs, custom_test_pipeline=None):
     """Inference image(s) with the segmentor.
@@ -108,38 +152,51 @@ def inference_segmentor(model, imgs, custom_test_pipeline=None):
     return result
 
 
-def inference_on_file(model, target_image, output_image, custom_test_pipeline):
+def process_rgb(input, mask, indexes):
+
     
+    rgb = stretch_rgb((input[indexes, :, :].transpose((1,2,0))/10000*255).astype(np.uint8))
+    rgb = np.where(mask.transpose((1,2,0)) == 1, 0, rgb)
+    rgb = np.where(rgb < 0, 0, rgb)
+    rgb = np.where(rgb > 255, 255, rgb)
+
+    return rgb
+
+
+def inference_on_file(target_image, model, custom_test_pipeline):
+
+    target_image = target_image.name
     time_taken=-1
+    st = time.time()
+    print('Running inference...')
     try:
-        st = time.time()
-        print('Running inference...')
         result = inference_segmentor(model, target_image, custom_test_pipeline)
-        print("Output has shape: " + str(result[0].shape))
-
-        ##### get metadata mask
-        mask = open_tiff(target_image)
-        meta = get_meta(target_image)
-        mask = np.where(mask == meta['nodata'], 1, 0)
-        mask = np.max(mask, axis=0)[None]
-
-        result[0] = np.where(mask == 1, -1, result[0])
-
-        ##### Save file to disk
-        meta["count"] = 1
-        meta["dtype"] = "int16"
-        meta["compress"] = "lzw"
-        meta["nodata"] = -1
-        print('Saving output...')
-        write_tiff(result[0], output_image, meta)
-        et = time.time()
-        time_taken = np.round(et - st, 1)
-        print(f'Inference completed in {str(time_taken)} seconds. Output available at: ' + output_image)
-        
     except:
-        print(f'Error on image {target_image} \nContinue to next input')
-        
-    return time_taken
+        print('Error: Try different channels order.')
+        model.cfg.data.test.pipeline[0]['channels_last'] = True
+        result = inference_segmentor(model, target_image, custom_test_pipeline)
+    print("Output has shape: " + str(result[0].shape))
+
+    ##### get metadata mask
+    input = open_tiff(target_image)
+    meta = get_meta(target_image)
+    mask = np.where(input == meta['nodata'], 1, 0)
+    mask = np.max(mask, axis=0)[None]
+    
+    rgb1 = process_rgb(input, mask, [2, 1, 0])
+    rgb2 = process_rgb(input, mask, [8, 7, 6])
+    rgb3 = process_rgb(input, mask, [14, 13, 12])
+
+    result[0] = np.where(mask == 1, 0, result[0])
+
+    et = time.time()
+    time_taken = np.round(et - st, 1)
+    print(f'Inference completed in {str(time_taken)} seconds')
+    
+    output=result[0][0] + 1
+    output = np.vstack([output[None], output[None], output[None]]).astype(np.uint8)
+    output=apply_color_map(output).transpose((1,2,0))
+    return rgb1,rgb2,rgb3,output
 
 def process_test_pipeline(custom_test_pipeline, bands=None):
     
@@ -161,34 +218,6 @@ def process_test_pipeline(custom_test_pipeline, bands=None):
         custom_test_pipeline[collect_index[0]]['meta_keys'] = keys
     
     return custom_test_pipeline
-
-
-def inference_on_files(config_path, ckpt, input_type, input_path, output_path, bands):
-    
-    # load model
-    config = Config.fromfile(config_path)
-    config.model.backbone.pretrained=None
-    model = init_segmentor(config, ckpt)
-    
-    # identify images to predict on
-    target_images = glob.glob(input_path+"*."+input_type)
-    
-    print('Identified images to predict on: ' + str(len(target_images)))
-    
-    # check if output folder available
-    if not os.path.isdir(output_path):
-        os.mkdir(output_path)
-    
-    # modify test pipeline if necessary
-    custom_test_pipeline=process_test_pipeline(model.cfg.data.test.pipeline, bands)
-        
-    # for each image predict and save to disk  
-    for i, target_image in enumerate(target_images):
-        
-        print(f'Working on Image {i}')
-        output_image = output_path+target_image.split("/")[-1].replace('.' + input_type, '_pred.'+input_type)
-        
-        inference_on_file(model, target_image, output_image, custom_test_pipeline)
 
 def main():
     

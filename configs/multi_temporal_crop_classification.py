@@ -11,7 +11,7 @@ num_workers = 2
 
 # model
 # TO BE DEFINED BY USER: model path
-pretrained_weights_path = '<path to pretrained weights>'
+pretrained_weights_path = '/home/charles/Desktop/FM/hls-foundation-os/Prithvi_100M.pt'
 num_layers = 6
 patch_size = 16
 embed_dim = 768
@@ -24,6 +24,7 @@ loss_weights_multi = [
     0.386375, 0.661126, 0.548184, 0.640482, 0.876862, 0.925186, 3.249462,
     1.542289, 2.175141, 2.272419, 3.062762, 3.626097, 1.198702
 ]
+
 loss_func = dict(
     type='CrossEntropyLoss',
     use_sigmoid=False,
@@ -33,8 +34,8 @@ output_embed_dim = embed_dim*num_frames
 
 
 # TO BE DEFINED BY USER: Save directory
-experiment = '<experiment name>'
-project_dir = '<project directory name>'
+experiment ='classification_test'
+project_dir = '../output/'
 work_dir = os.path.join(project_dir, experiment)
 save_path = work_dir
 
@@ -43,13 +44,14 @@ gpu_ids = range(0, 1)
 dataset_type = 'GeospatialDataset'
 
 # TO BE DEFINED BY USER: data directory
-data_root = '<path to data root>'
+data_root = '/home/charles/Desktop/FM/hls-foundation-os/data_splits/multi_temporal_crop_classification/'
 
 splits = dict(
-    train='<path to train split>',
-    val= '<path to val split>',
-    test=  '<path to test split>'
+    train=os.path.join(data_root, 'training_data.txt'),
+    val=os.path.join(data_root, 'validation_data.txt'),
+    test=os.path.join(data_root, 'validation_data.txt') 
 )
+
 
 
 img_norm_cfg = dict(
@@ -74,6 +76,12 @@ train_pipeline = [
     dict(type='LoadGeospatialImageFromFile', to_float32=True, channels_last=True),
     dict(type='LoadGeospatialAnnotations', reduce_zero_label=True),
     dict(type='RandomFlip', prob=0.5),
+
+    #Add more augmentation techniques 
+    dict(type='RandomRotation', degrees=10), # random rotation between -10 and 10 degrees
+    dict(type='RandomResizedCrop', height=tile_size, width=tile_size, scale=(0.8, 1.0)), # random scaling
+    dict(type='ColorJitter', brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1), # color jittering
+
     dict(type='ToTensor', keys=['img', 'gt_semantic_seg']),
      # to channels first
     dict(type="TorchPermute", keys=["img"], order=(2, 0, 1)),
@@ -115,6 +123,9 @@ CLASSES = ('Natural Vegetation',
 dataset = 'GeospatialDataset'
 
 data = dict(
+    #change double batch size, also change lr
+    # samples_per_gpu=16,
+
     samples_per_gpu=8,
     workers_per_gpu=4,
     train=dict(
@@ -153,17 +164,46 @@ data = dict(
         split=splits['val']
     ))
 
+#change
+# double learning rate to 3e-05
 optimizer = dict(
     type='Adam', lr=1.5e-05, betas=(0.9, 0.999), weight_decay=0.05)
 optimizer_config = dict(grad_clip=None)
+
+# If you're using ReduceLROnPlateau:
 lr_config = dict(
-    policy='poly',
-    warmup='linear',
-    warmup_iters=1500,
-    warmup_ratio=1e-06,
-    power=1.0,
-    min_lr=0.0,
-    by_epoch=False)
+    policy='ReduceLROnPlateau',
+    metric='validation_loss',  # assuming validation loss is your metric; change if different
+    patience=5,
+    factor=0.1,
+    min_lr=1e-6,
+    by_epoch=False
+)
+
+
+# # If you're using OneCycleLR:
+# lr_config = dict(
+#     policy='OneCycleLR',
+#     max_lr=0.01,
+#     total_steps=max_epochs*len(data['train']),  # assuming data['train'] gives your training dataset
+#     epochs=max_epochs,
+#     steps_per_epoch=len(data['train']),
+#     anneal_strategy='cos',
+#     final_div_factor=100,
+#     three_phase=False,
+#     by_epoch=False
+# )
+
+# #original
+# lr_config = dict(
+#     policy='poly',
+#     warmup='linear',
+#     warmup_iters=1500,
+#     warmup_ratio=1e-06,
+#     power=1.0,
+#     min_lr=0.0,
+#     by_epoch=False)
+
 log_config = dict(
     interval=10,
     hooks=[dict(type='TextLoggerHook'),
@@ -185,6 +225,8 @@ model = dict(
     type='TemporalEncoderDecoder',
     frozen_backbone=False,
     backbone=dict(
+        #change
+        # type='ResNet',
         type='TemporalViTEncoder',
         pretrained=pretrained_weights_path,
         img_size=img_size,
@@ -194,6 +236,9 @@ model = dict(
         in_chans=len(bands),
         embed_dim=embed_dim,
         depth=6,
+
+        #change
+        # depth=10,
         num_heads=num_heads,
         mlp_ratio=4.0,
         norm_pix_loss=False),
@@ -211,8 +256,16 @@ model = dict(
         in_index=-1,
         channels=256,
         num_convs=1,
+
+        #change
+        # num_convs = 2,
+
         concat_input=False,
-        dropout_ratio=0.1,
+
+        #change
+        # dropout_ratio=0.1,
+        dropout_ratio=0.3,
+
         norm_cfg=dict(type='BN', requires_grad=True),
         align_corners=False,
         loss_decode=loss_func),
@@ -224,7 +277,10 @@ model = dict(
         channels=256,
         num_convs=2,
         concat_input=False,
-        dropout_ratio=0.1,
+
+        # dropout_ratio=0.1,
+        dropout_ratio=0.3,
+
         norm_cfg=dict(type='BN', requires_grad=True),
         align_corners=False,
         loss_decode=loss_func),
